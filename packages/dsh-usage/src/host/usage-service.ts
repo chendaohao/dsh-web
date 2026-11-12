@@ -15,7 +15,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { dshHome } from '../dsh-home.ts'
 import { withIdentityEncoding } from './http.ts'
-import { adapterFor, balanceAppliesToRoute, isDeepSeekProviderRoute, providerErrorMessage } from '../core/adapters.ts'
+import { adapterFor, balanceAppliesToRoute, isDeepSeekProviderRoute, providerErrorMessage, resolveRouteAdapter } from '../core/adapters.ts'
 import type { BalanceParse, PlanParse } from '../core/adapters.ts'
 import { foldAliasRoutes } from '../core/provider-routes.ts'
 import { deepseekModelSpend } from '../core/pricing.ts'
@@ -311,7 +311,7 @@ export class UsageService {
     const routes = this.listProviderRoutes()
     const providers: ProviderSnapshotView[] = []
     for (const route of routes) {
-      const adapter = adapterFor(route.id)
+      const adapter = resolveRouteAdapter(route.id, this.routeBaseUrl(route.id))
       const snapshot = this.snapshots.get(route.id)
       const error = snapshot?.balanceError ?? snapshot?.planError
       providers.push({
@@ -669,7 +669,7 @@ export class UsageService {
           // out of a cycle that outlived the service.
           if (this.disposed) return
           seen.add(route.id)
-          const adapter = adapterFor(route.id)
+          const adapter = resolveRouteAdapter(route.id, this.routeBaseUrl(route.id))
           if (adapter === undefined || (adapter.balance === undefined && adapter.plan === undefined)) continue
           await this.probeRoute(route, adapter)
         }

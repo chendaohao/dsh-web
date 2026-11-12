@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adapterFor, balanceAppliesToRoute, isDeepSeekProviderRoute, originOf, providerErrorMessage, PROVIDER_ADAPTERS } from '../src/core/adapters.ts'
+import { adapterFor, balanceAppliesToRoute, isDeepSeekProviderRoute, originOf, providerErrorMessage, PROVIDER_ADAPTERS, resolveRouteAdapter } from '../src/core/adapters.ts'
 
 describe('adapterFor', () => {
   it('serves every documented route id', () => {
@@ -55,6 +55,29 @@ describe('adapterFor', () => {
 // so the balance probe must not reach it: adding it to `ids` would let
 // credential resolution fall back to the family DEEPSEEK_API_KEY and print
 // the API-key account's money under the account route's name.
+describe('resolveRouteAdapter (id first, then endpoint)', () => {
+  it('finds a second account on one vendor by the endpoint it points at', () => {
+    // The provider directory is keyed by route id, so a hand-declared second
+    // account (`kimi-ss`) matches no adapter and drops out of the plan section
+    // entirely. The endpoint is what the two routes genuinely share.
+    expect(resolveRouteAdapter('kimi-ss', 'https://api.kimi.com/coding')).toBe(adapterFor('kimi-coding'))
+  })
+
+  it('never widens a route that already matches by id', () => {
+    // id matching stays authoritative: a deepseek route pointed at some other
+    // host must not become a kimi route just because of its base URL.
+    expect(resolveRouteAdapter('deepseek', 'https://api.kimi.com/coding')).toBe(adapterFor('deepseek'))
+  })
+
+  it('returns undefined for an unclaimed endpoint', () => {
+    expect(resolveRouteAdapter('unknown-provider', 'https://example.invalid/v1')).toBeUndefined()
+    expect(resolveRouteAdapter('unknown-provider', undefined)).toBeUndefined()
+    // Right host, wrong path prefix — the vendor serves other APIs there.
+    expect(resolveRouteAdapter('unknown-provider', 'https://api.kimi.com/v1')).toBeUndefined()
+    expect(resolveRouteAdapter('unknown-provider', 'not a url')).toBeUndefined()
+  })
+})
+
 describe('isDeepSeekProviderRoute (family membership wider than the probe directory)', () => {
   it('user signed in to a DeepSeek account has their route recognized as the official family', () => {
     // Given the account route and the two API-key routes
@@ -162,6 +185,30 @@ describe('kimi coding plan parse', () => {
     expect(parsed?.planName).toBe('LEVEL_8')
     expect(parsed?.windows).toContainEqual({ key: '5h', name: '5h limit', percent: 2, resetsAt: '2026-08-29T12:00:00.000Z' })
     expect(parsed?.windows).toContainEqual({ key: 'week', name: 'Weekly', percent: 45, resetsAt: '2026-08-31T00:00:00.000Z' })
+  })
+
+  it('derives the percentage from remaining when proto3 omits a zero used', () => {
+    // These endpoints serialize proto3 JSON, which omits a field holding its
+    // zero value. An untouched window therefore carries `remaining` at the
+    // limit and NO `used` — reading `used` alone dropped the row's percentage
+    // instead of reporting 0%.
+    const parsed = adapter.plan?.parse(200, {
+      usage: { limit: '100', remaining: '100' },
+      limits: [
+        { window: { duration: 300, timeUnit: 'TIME_UNIT_MINUTE' }, detail: { name: '5h limit', limit: '100', remaining: '75' } },
+      ],
+    })
+    expect(parsed?.windows).toContainEqual({ key: '5h', name: '5h limit', percent: 25, resetsAt: undefined })
+    expect(parsed?.windows).toContainEqual({ key: 'week', name: 'Weekly', percent: 0, resetsAt: undefined })
+  })
+
+  it('prefers used over remaining when the endpoint sends both', () => {
+    const parsed = adapter.plan?.parse(200, {
+      limits: [
+        { window: { duration: 60, timeUnit: 'TIME_UNIT_MINUTE' }, detail: { limit: 100, used: 30, remaining: 70 } },
+      ],
+    })
+    expect(parsed?.windows[0]?.percent).toBe(30)
   })
 
   it('normalizes reset instants or drops them (never passes raw text through)', () => {

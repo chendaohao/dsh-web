@@ -137,6 +137,28 @@ function usedPercent(used: unknown, limit: unknown): number | undefined {
   return Math.max(0, Math.min(100, (usedNum / limitNum) * 100))
 }
 
+/**
+ * Used-percent for one quota row, deriving it from `remaining` when `used` is
+ * absent.
+ *
+ * The coding-plan endpoints serialize proto3 JSON, and proto3 omits a field
+ * that holds its zero value. A row a user has not touched yet therefore
+ * arrives with `remaining` at its limit and NO `used` at all — and reading
+ * `used` alone dropped the row's percentage entirely instead of showing 0%.
+ *
+ * @param row - one quota row (`limits[]` entry or the summary object).
+ * @returns the used percentage, or undefined when the row carries neither
+ *   `used` nor a derivable pair.
+ */
+function quotaUsedPercent(row: Record<string, unknown>): number | undefined {
+  const direct = usedPercent(row.used, row.limit)
+  if (direct !== undefined) return direct
+  const limit = toNum(row.limit)
+  const remaining = toNum(row.remaining)
+  if (limit === undefined || remaining === undefined || limit <= 0) return undefined
+  return Math.max(0, Math.min(100, ((limit - remaining) / limit) * 100))
+}
+
 function bearer(apiKey: string): Record<string, string> {
   return { authorization: `Bearer ${apiKey}` }
 }
@@ -214,7 +236,7 @@ const KIMI_CODING: ProviderAdapter = {
           const duration = typeof window === 'object' && window !== null ? toNum((window as Record<string, unknown>).duration) : undefined
           const unit = typeof window === 'object' && window !== null ? str((window as Record<string, unknown>).timeUnit) : undefined
           const key = duration === 300 && unit === 'TIME_UNIT_MINUTE' ? '5h' : duration !== undefined ? `w-${duration}` : 'window'
-          const percent = usedPercent(row.used, row.limit)
+          const percent = quotaUsedPercent(row)
           windows.push({ key, name: str(row.name), percent, resetsAt: toIso(row.resetTime) })
         }
       }
@@ -224,7 +246,7 @@ const KIMI_CODING: ProviderAdapter = {
         windows.push({
           key: 'week',
           name: 'Weekly',
-          percent: usedPercent(weekly.used, weekly.limit),
+          percent: quotaUsedPercent(weekly),
           resetsAt: toIso(weekly.resetTime),
         })
       }
@@ -499,6 +521,54 @@ export const PROVIDER_ADAPTERS: readonly ProviderAdapter[] = [
 /** Find the adapter serving a provider route key, if any. */
 export function adapterFor(provider: string): ProviderAdapter | undefined {
   return PROVIDER_ADAPTERS.find((adapter) => adapter.ids.includes(provider))
+}
+
+/**
+ * Route endpoints that reuse another adapter's probe.
+ *
+ * A vendor's adapter is found by route id, and the profile's provider directory
+ * is a dictionary keyed by that id — so a SECOND account on one vendor needs a
+ * hand-declared route under a new id (`kimi-ss` beside `kimi-coding`). Id
+ * matching alone leaves that route with no adapter: `planSupported` stays
+ * false, the account drops out of the plan section, and the pet bubble falls
+ * back to today's token count.
+ *
+ * The endpoint is what the two routes genuinely share, so it is the fallback
+ * key. Credentials are NOT shared: `resolveCredential` looks up
+ * `llm-pi-ai/<route id>.apiKeyEnv`, so each account still probes with its own
+ * key and reports its own numbers.
+ */
+const ENDPOINT_ADAPTERS: readonly { host: string, pathPrefix: string, adapter: ProviderAdapter }[] = [
+  { host: 'api.kimi.com', pathPrefix: '/coding', adapter: KIMI_CODING },
+]
+
+/**
+ * The adapter whose vendor serves `baseURL`, ignoring the route id.
+ *
+ * @param baseURL - the route's configured base URL, if any.
+ * @returns the adapter for that endpoint, or undefined when no vendor claims it.
+ */
+function adapterForEndpoint(baseURL: string | undefined): ProviderAdapter | undefined {
+  if (baseURL === undefined || baseURL.trim() === '') return undefined
+  let url: URL
+  try {
+    url = new URL(baseURL)
+  } catch {
+    return undefined
+  }
+  return ENDPOINT_ADAPTERS.find(entry => url.host === entry.host && url.pathname.startsWith(entry.pathPrefix))?.adapter
+}
+
+/**
+ * The adapter for one configured route: the id it was declared under first,
+ * then the endpoint its profile points at.
+ *
+ * @param id - the route's provider id.
+ * @param baseURL - the route's configured base URL, if any.
+ * @returns the adapter serving the route, or undefined when nothing matches.
+ */
+export function resolveRouteAdapter(id: string, baseURL: string | undefined): ProviderAdapter | undefined {
+  return adapterFor(id) ?? adapterForEndpoint(baseURL)
 }
 
 /** Origin of a configured base URL, or undefined when it cannot be parsed. */
